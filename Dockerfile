@@ -50,6 +50,7 @@ COPY requirements.txt .
 # (optional but helpful)
 ENV PIP_DEFAULT_TIMEOUT=60
 RUN pip install --no-cache-dir -r requirements.txt
+# running yaml file
 
 COPY . .
 
