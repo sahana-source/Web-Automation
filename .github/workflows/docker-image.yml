@@ -28,3 +28,4 @@ jobs:
 
       - name: Push Docker image
         run: docker push $FULL_IMAGE
+
