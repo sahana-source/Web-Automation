@@ -13,6 +13,16 @@ def browser():
     opts.add_argument("--disable-notifications")
     opts.add_argument("--disable-popup-blocking")
     opts.add_argument("--incognito")
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1920,1080")
+    opts.add_argument("--disable-notifications")
+    opts.add_argument("--disable-popup-blocking")
+    # (optional, sometimes helps)
+    opts.add_argument("--disable-software-rasterizer")
+
     # Uncomment if running in CI/CD or Docker
     # opts.add_argument("--headless=new")
     # opts.add_argument("--no-sandbox")
