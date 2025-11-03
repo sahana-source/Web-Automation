@@ -48,12 +48,22 @@ jobs:
       - name: kubectl version
         run: kubectl version --client && kubectl get nodes
 
-      # Create namespace & PVC
-      - name: Create namespace
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Create namespace (idempotent)
         run: kubectl create namespace qa-tests --dry-run=client -o yaml | kubectl apply -f -
+      
+      - name: Debug files
+        run: |
+          ls -la
+          ls -la k8s
+          echo "----- reports-pvc.yaml -----"
+          cat k8s/reports-pvc.yaml
       
       - name: Apply PVC
         run: kubectl apply -f k8s/reports-pvc.yaml
+
       
       # Run the Job
       - name: Apply test Job
