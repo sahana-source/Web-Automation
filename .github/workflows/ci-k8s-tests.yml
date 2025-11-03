@@ -54,12 +54,14 @@ jobs:
       - name: Apply namespace (idempotent)
         run: kubectl create namespace qa-tests --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Apply Job
+      - name: Apply Job (expand vars first)
+        shell: bash
         run: |
-          # If your manifest has ${DOCKERHUB_USERNAME} / ${GITHUB_SHA}, expand them:
-          export DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
-          export GITHUB_SHA=${{ github.sha }}
-          envsubst < k8s/job-web-tests.yaml | kubectl apply -f -
+          export DOCKERHUB_USERNAME='${{ secrets.DOCKERHUB_USERNAME }}'
+          export GITHUB_SHA='${{ github.sha }}'
+          envsubst < k8s/job-web-tests.yaml | tee expanded-job.yaml
+          kubectl apply -f expanded-job.yaml
+
       
       - name: Wait for completion (extend timeout if needed)
         run: kubectl wait --for=condition=complete job/web-tests -n qa-tests --timeout=1800s
