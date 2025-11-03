@@ -56,38 +56,31 @@ jobs:
 
       - name: Apply Job
         run: |
-          # if you need envsubst, do:
-          # envsubst < k8s/job-web-tests.yaml | kubectl apply -f -
-          kubectl apply -f k8s/job-web-tests.yaml
+          # If your manifest has ${DOCKERHUB_USERNAME} / ${GITHUB_SHA}, expand them:
+          export DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
+          export GITHUB_SHA=${{ github.sha }}
+          envsubst < k8s/job-web-tests.yaml | kubectl apply -f -
       
-      - name: Wait for pod to be Running
+      - name: Wait for completion (extend timeout if needed)
+        run: kubectl wait --for=condition=complete job/web-tests -n qa-tests --timeout=1800s
+      
+      - name: Get pod name
+        id: pod
         shell: bash
         run: |
-          for i in {1..60}; do
-            POD=$(kubectl get pods -n qa-tests -l job-name=web-tests -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-            [ -n "$POD" ] || { echo "Pod not created yet"; sleep 5; continue; }
-            PHASE=$(kubectl get pod -n qa-tests "$POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)
-            echo "Pod=$POD Phase=$PHASE"
-            [ "$PHASE" = "Running" ] && break
-            sleep 5
-          done
-          [ -z "$POD" ] && { echo "No pod found"; exit 1; }
-          echo "POD=$POD" >> $GITHUB_ENV
+          POD=$(kubectl get pods -n qa-tests -l job-name=web-tests -o jsonpath='{.items[0].metadata.name}')
+          echo "pod=$POD" >> "$GITHUB_OUTPUT"
       
-      - name: Copy report while pod is alive
+      - name: Reconstruct HTML report from logs
         shell: bash
         run: |
-          # try a few times during the 60s sleep window
-          for i in {1..6}; do
-            if kubectl cp -n qa-tests "${POD}:/reports/report.html" "./report.html"; then
-              echo "Report copied."
-              exit 0
-            fi
-            echo "Report not ready yet, retrying..."
-            sleep 10
-          done
-          echo "Failed to copy report before pod completed."
-          exit 1
+          LINE=$(kubectl logs -n qa-tests "${{ steps.pod.outputs.pod }}" | grep '^REPORT_B64=' | tail -n1 || true)
+          if [ -z "$LINE" ]; then
+            echo "No REPORT_B64 line found in logs"; exit 1
+          fi
+          B64=${LINE#REPORT_B64=}
+          echo "$B64" | base64 -d > report.html
+          test -s report.html && echo "Report reconstructed (size: $(wc -c < report.html) bytes)."
       
       - name: Upload HTML report
         uses: actions/upload-artifact@v4
@@ -95,19 +88,15 @@ jobs:
           name: html-report-${{ github.sha }}
           path: ./report.html
       
-      # (Optional) now wait for completion, or just clean up
-      - name: Wait for completion (longer timeout just in case)
-        run: kubectl wait --for=condition=complete job/web-tests -n qa-tests --timeout=1800s
-      
+      # Helpful debug if anything fails
       - name: Debug on failure
         if: failure()
         run: |
           kubectl -n qa-tests get jobs,pods,events
           echo "---- DESCRIBE JOB ----"
           kubectl -n qa-tests describe job/web-tests || true
-          echo "---- DESCRIBE POD ----"
-          kubectl -n qa-tests describe pod "$POD" || true
           echo "---- LOGS (tail) ----"
-          kubectl -n qa-tests logs "$POD" --tail=200 || true
+          kubectl -n qa-tests logs "${{ steps.pod.outputs.pod }}" --tail=200 || true
+
 
 
