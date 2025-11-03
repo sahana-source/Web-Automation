@@ -11,24 +11,30 @@ spec:
       restartPolicy: Never
       containers:
         - name: web-tests
-          image: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/automationdocker:${{ github.sha }}
-          imagePullPolicy: IfNotPresent   # or Always if you want to force-pull
+          image: docker.io/${DOCKERHUB_USERNAME}/automationdocker:${GITHUB_SHA}
+          imagePullPolicy: IfNotPresent
           env:
             - name: HEADLESS
               value: "1"
+          volumeMounts:
+            - name: reports
+              mountPath: /reports
           args:
             - sh
             - -c
             - >
+              set -e;
               pytest -v --html=/reports/report.html --self-contained-html;
-              EXIT=$?;
-              echo "REPORT_FILE=/reports/report.html";
-              # keep container alive briefly so CI can kubectl cp
-              sleep 60;
-              exit $EXIT
-          volumeMounts:
-            - name: reports
-              mountPath: /reports
+              echo "Encoding report to base64 for CI artifact...";
+              python - <<'PY'
+import base64, sys, pathlib
+p = pathlib.Path('/reports/report.html')
+if p.exists():
+    b64 = base64.b64encode(p.read_bytes()).decode('ascii')
+    print('REPORT_B64=' + b64)
+else:
+    print('NO_REPORT')
+PY
       volumes:
         - name: reports
           emptyDir: {}
