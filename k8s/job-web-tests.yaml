@@ -1,0 +1,30 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: web-tests
+  namespace: qa-tests
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 60
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: web-tests
+          image: docker.io/${DOCKERHUB_USERNAME}/automationdocker:${GITHUB_SHA}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HEADLESS
+              value: "1"
+          args:
+            - pytest
+            - -v
+            - --html=/reports/report.html
+            - --self-contained-html
+          volumeMounts:
+            - name: reports
+              mountPath: /reports
+      volumes:
+        - name: reports
+          persistentVolumeClaim:
+            claimName: reports-pvc
