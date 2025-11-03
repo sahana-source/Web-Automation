@@ -48,76 +48,54 @@ jobs:
       - name: kubectl version
         run: kubectl version --client && kubectl get nodes
 
+      # Create namespace & PVC
       - name: Create namespace
-        run: kubectl create namespace "$NAMESPACE"
-
-      # Apply a Job that uses the exact image we just pushed.
-      # We add a short sleep after pytest so kubectl cp can succeed even after tests finish.
+        run: kubectl create namespace qa-tests --dry-run=client -o yaml | kubectl apply -f -
+      
+      - name: Apply PVC
+        run: kubectl apply -f k8s/reports-pvc.yaml
+      
+      # Run the Job
       - name: Apply test Job
-        shell: bash
-        run: |
-          cat > job-web-tests.yaml <<'YAML'
-          apiVersion: batch/v1
-          kind: Job
-          metadata:
-            name: ${JOB_NAME}
-            namespace: ${NAMESPACE}
-          spec:
-            backoffLimit: 0
-            ttlSecondsAfterFinished: 60
-            template:
-              spec:
-                restartPolicy: Never
-                containers:
-                  - name: web-tests
-                    image: ${FULL_IMAGE}
-                    imagePullPolicy: IfNotPresent
-                    env:
-                      - name: HEADLESS
-                        value: "1"
-                      - name: RUNNER
-                        value: "github-actions/kind"
-                      - name: IMAGE_REF
-                        value: "${FULL_IMAGE}"
-                    volumeMounts:
-                      - name: reports
-                        mountPath: /reports
-                    args:
-                      - sh
-                      - -c
-                      - >
-                        pytest -v --html=${REPORT_PATH} --self-contained-html;
-                        EXIT=$?;
-                        echo "REPORT_FILE=${REPORT_PATH}";
-                        # give cp a small window even if job completes fast
-                        sleep 15;
-                        exit $EXIT
-                volumes:
-                  - name: reports
-                    emptyDir: {}
-          YAML
-
-          # Expand env vars inside the manifest and apply
-          envsubst < job-web-tests.yaml | kubectl apply -f -
-
+        run: kubectl apply -f k8s/job-web-tests.yaml
+      
       - name: Wait for completion
-        run: kubectl wait --for=condition=complete job/${JOB_NAME} -n ${NAMESPACE} --timeout=900s
-
-      - name: Get pod name
-        id: pod
-        shell: bash
+        run: kubectl wait --for=condition=complete job/web-tests -n qa-tests --timeout=900s
+      
+      # Start a tiny helper pod that mounts the same PVC
+      - name: Start helper pod (PVC reader)
         run: |
-          POD=$(kubectl get pods -n ${NAMESPACE} -l job-name=${JOB_NAME} -o jsonpath='{.items[0].metadata.name}')
-          echo "pod=$POD" >> "$GITHUB_OUTPUT"
-
-      - name: Fetch HTML report
-        shell: bash
+          kubectl run pvc-reader -n qa-tests --image=alpine --restart=Never --overrides '
+          {
+            "apiVersion":"v1",
+            "spec":{
+              "containers":[
+                {
+                  "name":"alpine",
+                  "image":"alpine",
+                  "command":["sleep","3600"],
+                  "volumeMounts":[{"name":"reports","mountPath":"/reports"}]
+                }
+              ],
+              "volumes":[{"name":"reports","persistentVolumeClaim":{"claimName":"reports-pvc"}}]
+            }
+          }'
+          kubectl wait --for=condition=Ready pod/pvc-reader -n qa-tests --timeout=120s
+      
+      # Now copy from the helper pod (it's running)
+      - name: Copy HTML report from helper pod
         run: |
-          kubectl cp -n ${NAMESPACE} "${{ steps.pod.outputs.pod }}:${REPORT_PATH}" "./report.html"
+          kubectl cp -n qa-tests "pvc-reader:/reports/report.html" "./report.html"
           test -s report.html && echo "Report copied."
-
+      
       - name: Upload HTML report
         uses: actions/upload-artifact@v4
         with:
           name: html-report-${{ github.sha }}
           path: ./report.html
+      
+      # Cleanup helper
+      - name: Cleanup helper pod
+        if: always()
+        run: kubectl delete pod pvc-reader -n qa-tests --ignore-not-found
+
