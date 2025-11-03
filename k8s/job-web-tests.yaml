@@ -11,20 +11,24 @@ spec:
       restartPolicy: Never
       containers:
         - name: web-tests
-          image: docker.io/${DOCKERHUB_USERNAME}/automationdocker:${GITHUB_SHA}
-          imagePullPolicy: IfNotPresent
+          image: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/automationdocker:${{ github.sha }}
+          imagePullPolicy: IfNotPresent   # or Always if you want to force-pull
           env:
             - name: HEADLESS
               value: "1"
           args:
-            - pytest
-            - -v
-            - --html=/reports/report.html
-            - --self-contained-html
+            - sh
+            - -c
+            - >
+              pytest -v --html=/reports/report.html --self-contained-html;
+              EXIT=$?;
+              echo "REPORT_FILE=/reports/report.html";
+              # keep container alive briefly so CI can kubectl cp
+              sleep 60;
+              exit $EXIT
           volumeMounts:
             - name: reports
               mountPath: /reports
       volumes:
         - name: reports
-          persistentVolumeClaim:
-            claimName: reports-pvc
+          emptyDir: {}
