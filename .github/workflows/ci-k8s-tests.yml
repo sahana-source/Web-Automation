@@ -1,0 +1,123 @@
+name: CI - Build Image, Run K8s Tests, Upload Report
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_REPO: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/automationdocker
+      IMAGE_TAG: ${{ github.sha }}
+      FULL_IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/automationdocker:${{ github.sha }}
+      NAMESPACE: qa-tests
+      JOB_NAME: web-tests
+      REPORT_PATH: /reports/report.html
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Build & push the Docker image with a unique tag for this commit
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push image (latest + sha)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_REPO }}:latest
+            ${{ env.FULL_IMAGE }}
+
+      # Spin up a temporary Kubernetes cluster inside the runner
+      - name: Create KinD cluster
+        uses: helm/kind-action@v1
+        with:
+          version: v0.23.0
+
+      - name: kubectl version
+        run: kubectl version --client && kubectl get nodes
+
+      - name: Create namespace
+        run: kubectl create namespace "$NAMESPACE"
+
+      # Apply a Job that uses the exact image we just pushed.
+      # We add a short sleep after pytest so kubectl cp can succeed even after tests finish.
+      - name: Apply test Job
+        shell: bash
+        run: |
+          cat > job-web-tests.yaml <<'YAML'
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${JOB_NAME}
+            namespace: ${NAMESPACE}
+          spec:
+            backoffLimit: 0
+            ttlSecondsAfterFinished: 60
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: web-tests
+                    image: ${FULL_IMAGE}
+                    imagePullPolicy: IfNotPresent
+                    env:
+                      - name: HEADLESS
+                        value: "1"
+                      - name: RUNNER
+                        value: "github-actions/kind"
+                      - name: IMAGE_REF
+                        value: "${FULL_IMAGE}"
+                    volumeMounts:
+                      - name: reports
+                        mountPath: /reports
+                    args:
+                      - sh
+                      - -c
+                      - >
+                        pytest -v --html=${REPORT_PATH} --self-contained-html;
+                        EXIT=$?;
+                        echo "REPORT_FILE=${REPORT_PATH}";
+                        # give cp a small window even if job completes fast
+                        sleep 15;
+                        exit $EXIT
+                volumes:
+                  - name: reports
+                    emptyDir: {}
+          YAML
+
+          # Expand env vars inside the manifest and apply
+          envsubst < job-web-tests.yaml | kubectl apply -f -
+
+      - name: Wait for completion
+        run: kubectl wait --for=condition=complete job/${JOB_NAME} -n ${NAMESPACE} --timeout=900s
+
+      - name: Get pod name
+        id: pod
+        shell: bash
+        run: |
+          POD=$(kubectl get pods -n ${NAMESPACE} -l job-name=${JOB_NAME} -o jsonpath='{.items[0].metadata.name}')
+          echo "pod=$POD" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch HTML report
+        shell: bash
+        run: |
+          kubectl cp -n ${NAMESPACE} "${{ steps.pod.outputs.pod }}:${REPORT_PATH}" "./report.html"
+          test -s report.html && echo "Report copied."
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: html-report-${{ github.sha }}
+          path: ./report.html
