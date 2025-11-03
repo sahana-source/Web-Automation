@@ -51,52 +51,43 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         
-      - name: Create namespace (idempotent)
+      - name: Apply namespace (idempotent)
         run: kubectl create namespace qa-tests --dry-run=client -o yaml | kubectl apply -f -
-      
-      - name: Debug files
-        run: |
-          ls -la
-          ls -la k8s
-          echo "----- reports-pvc.yaml -----"
-          cat k8s/reports-pvc.yaml
-      
-      - name: Apply PVC
-        run: kubectl apply -f k8s/reports-pvc.yaml
 
-      
-      # Run the Job
-      - name: Apply test Job
-        run: kubectl apply -f k8s/job-web-tests.yaml
-      
-      - name: Wait for completion
-        run: kubectl wait --for=condition=complete job/web-tests -n qa-tests --timeout=900s
-      
-      # Start a tiny helper pod that mounts the same PVC
-      - name: Start helper pod (PVC reader)
+      - name: Apply Job
         run: |
-          kubectl run pvc-reader -n qa-tests --image=alpine --restart=Never --overrides '
-          {
-            "apiVersion":"v1",
-            "spec":{
-              "containers":[
-                {
-                  "name":"alpine",
-                  "image":"alpine",
-                  "command":["sleep","3600"],
-                  "volumeMounts":[{"name":"reports","mountPath":"/reports"}]
-                }
-              ],
-              "volumes":[{"name":"reports","persistentVolumeClaim":{"claimName":"reports-pvc"}}]
-            }
-          }'
-          kubectl wait --for=condition=Ready pod/pvc-reader -n qa-tests --timeout=120s
+          # if you need envsubst, do:
+          # envsubst < k8s/job-web-tests.yaml | kubectl apply -f -
+          kubectl apply -f k8s/job-web-tests.yaml
       
-      # Now copy from the helper pod (it's running)
-      - name: Copy HTML report from helper pod
+      - name: Wait for pod to be Running
+        shell: bash
         run: |
-          kubectl cp -n qa-tests "pvc-reader:/reports/report.html" "./report.html"
-          test -s report.html && echo "Report copied."
+          for i in {1..60}; do
+            POD=$(kubectl get pods -n qa-tests -l job-name=web-tests -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+            [ -n "$POD" ] || { echo "Pod not created yet"; sleep 5; continue; }
+            PHASE=$(kubectl get pod -n qa-tests "$POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            echo "Pod=$POD Phase=$PHASE"
+            [ "$PHASE" = "Running" ] && break
+            sleep 5
+          done
+          [ -z "$POD" ] && { echo "No pod found"; exit 1; }
+          echo "POD=$POD" >> $GITHUB_ENV
+      
+      - name: Copy report while pod is alive
+        shell: bash
+        run: |
+          # try a few times during the 60s sleep window
+          for i in {1..6}; do
+            if kubectl cp -n qa-tests "${POD}:/reports/report.html" "./report.html"; then
+              echo "Report copied."
+              exit 0
+            fi
+            echo "Report not ready yet, retrying..."
+            sleep 10
+          done
+          echo "Failed to copy report before pod completed."
+          exit 1
       
       - name: Upload HTML report
         uses: actions/upload-artifact@v4
@@ -104,8 +95,19 @@ jobs:
           name: html-report-${{ github.sha }}
           path: ./report.html
       
-      # Cleanup helper
-      - name: Cleanup helper pod
-        if: always()
-        run: kubectl delete pod pvc-reader -n qa-tests --ignore-not-found
+      # (Optional) now wait for completion, or just clean up
+      - name: Wait for completion (longer timeout just in case)
+        run: kubectl wait --for=condition=complete job/web-tests -n qa-tests --timeout=1800s
+      
+      - name: Debug on failure
+        if: failure()
+        run: |
+          kubectl -n qa-tests get jobs,pods,events
+          echo "---- DESCRIBE JOB ----"
+          kubectl -n qa-tests describe job/web-tests || true
+          echo "---- DESCRIBE POD ----"
+          kubectl -n qa-tests describe pod "$POD" || true
+          echo "---- LOGS (tail) ----"
+          kubectl -n qa-tests logs "$POD" --tail=200 || true
+
 
